@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvgen"
+version = "0.1.0"
+description = "A CLI tool to generate professional CVs from Markdown using a reference PDF template"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.0",
+    "mistune>=3.2.1",
+    "pdfplumber>=0.10",
+    "reportlab>=4.0",
+]
+
+[project.scripts]
+cvgen = "cv_maker.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cv_maker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
