@@ -2,21 +2,75 @@
 
 from __future__ import annotations
 
-import sys
+import platform
+import subprocess
 from pathlib import Path
 from typing import Optional
 
 import click
 
+from cv_maker.cli_ui import UI, default_pdf_output
 from cv_maker.parser.markdown_parser import MarkdownParser
 from cv_maker.renderer.pdf_renderer import PDFRenderer
 from cv_maker.template.extractor import TemplateExtractor, TemplateStyle
 
+EXAMPLES = """
+Examples:
 
-@click.group()
-@click.version_option(package_name="cvgen")
-def main() -> None:
-    """cvgen – Generate professional CVs from Markdown and a reference PDF template."""
+  \b
+  # Validate your Markdown CV before generating
+  cvgen validate my-cv.md
+
+  \b
+  # Generate a PDF (output defaults to my-cv.pdf)
+  cvgen generate --data my-cv.md
+
+  \b
+  # Match the look of an existing PDF résumé
+  cvgen generate --data my-cv.md --template reference.pdf --output cv.pdf
+
+  \b
+  # Quick preview and open it (macOS)
+  cvgen preview --data my-cv.md --open
+
+  \b
+  # Extract colours and layout from a reference PDF
+  cvgen extract-template --input reference.pdf --output template.json
+"""
+
+
+def _ui_from_ctx(ctx: click.Context) -> UI:
+    return ctx.ensure_object(UI)
+
+
+@click.group(
+    context_settings={
+        "help_option_names": ["-h", "--help"],
+        "max_content_width": 100,
+    },
+    epilog=EXAMPLES,
+)
+@click.version_option(package_name="cvgen", prog_name="cvgen")
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="Show extra detail while a command runs.",
+)
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    help="Only print errors and the final result path.",
+)
+@click.pass_context
+def main(ctx: click.Context, verbose: bool, quiet: bool) -> None:
+    """Generate professional CV PDFs from Markdown.
+
+    Write your CV in a simple Markdown format, optionally match the visual
+    style of a reference PDF, and export a print-ready document.
+    """
+    ctx.obj = UI(verbose=verbose, quiet=quiet)
 
 
 # ---------------------------------------------------------------------------
@@ -26,74 +80,77 @@ def main() -> None:
 
 @main.command()
 @click.option(
+    "-t",
     "--template",
     "template_path",
-    type=click.Path(exists=True, dir_okay=False),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Reference PDF whose visual layout will be reproduced.",
+    help="Reference PDF whose layout and colours are reproduced.",
 )
 @click.option(
+    "-d",
     "--data",
     "data_path",
     required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Markdown file containing CV data.",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Markdown file with your CV content.",
 )
 @click.option(
+    "-o",
     "--output",
     "output_path",
-    required=True,
-    type=click.Path(dir_okay=False, writable=True),
-    help="Output PDF path.",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    help="Output PDF path (defaults to the data filename with a .pdf extension).",
 )
+@click.pass_context
 def generate(
-    template_path: Optional[str],
-    data_path: str,
-    output_path: str,
+    ctx: click.Context,
+    template_path: Optional[Path],
+    data_path: Path,
+    output_path: Optional[Path],
 ) -> None:
-    """Generate a CV PDF from a Markdown data file.
-
-    Optionally supply a reference PDF template whose visual design will be
-    used for the generated output.
-    """
+    """Build a CV PDF from Markdown data."""
+    ui = _ui_from_ctx(ctx)
+    out = output_path or Path(default_pdf_output(str(data_path)))
     parser = MarkdownParser()
 
-    click.echo(f"Parsing CV data from: {data_path}")
+    ui.step(f"Parsing {data_path}")
     try:
-        cv = parser.parse_file(data_path)
+        cv = parser.parse_file(str(data_path))
     except Exception as exc:
-        click.secho(f"Error parsing Markdown file: {exc}", fg="red", err=True)
-        sys.exit(1)
+        ui.exit_with_error(f"Could not parse Markdown: {exc}")
 
-    # Validate and surface any warnings
+    ui.detail(
+        f"{len(cv.experience)} experience, {len(cv.skills)} skills, "
+        f"{len(cv.education)} education"
+    )
+
     warnings = cv.validate_required_fields()
-    for w in warnings:
-        click.secho(f"Warning: {w}", fg="yellow", err=True)
+    for warning in warnings:
+        ui.warn(warning)
 
-    # Extract template style if a reference PDF was supplied
     style: Optional[TemplateStyle] = None
     if template_path:
-        click.echo(f"Extracting template style from: {template_path}")
+        ui.step(f"Reading template from {template_path}")
         extractor = TemplateExtractor()
         try:
-            style = extractor.extract(template_path)
-        except Exception as exc:
-            click.secho(
-                f"Warning: could not extract template style ({exc}); "
-                "using default style.",
-                fg="yellow",
-                err=True,
+            style = extractor.extract(str(template_path))
+            ui.detail(
+                f"Page {style.page_geometry.width:.0f}×{style.page_geometry.height:.0f} pt, "
+                f"primary {style.primary_color}"
             )
+        except Exception as exc:
+            ui.warn(f"Could not read template ({exc}); using default style.")
 
+    ui.step(f"Rendering {out}")
     renderer = PDFRenderer(template_style=style)
-    click.echo(f"Rendering PDF to: {output_path}")
     try:
-        renderer.render(cv, output_path)
+        renderer.render(cv, str(out))
     except Exception as exc:
-        click.secho(f"Error rendering PDF: {exc}", fg="red", err=True)
-        sys.exit(1)
+        ui.exit_with_error(f"Could not render PDF: {exc}")
 
-    click.secho(f"✓ Generated: {output_path}", fg="green")
+    ui.result_path(str(out))
 
 
 # ---------------------------------------------------------------------------
@@ -103,37 +160,43 @@ def generate(
 
 @main.command("extract-template")
 @click.option(
+    "-i",
     "--input",
     "input_path",
     required=True,
-    type=click.Path(exists=True, dir_okay=False),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Reference PDF to analyse.",
 )
 @click.option(
+    "-o",
     "--output",
     "output_path",
     required=True,
-    type=click.Path(dir_okay=False, writable=True),
-    help="Output JSON file path.",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    help="JSON file to write the extracted style to.",
 )
-def extract_template(input_path: str, output_path: str) -> None:
-    """Extract layout, fonts, and colour information from a reference PDF.
-
-    The resulting JSON file can be inspected or used as a persistent template.
-    """
+@click.pass_context
+def extract_template(
+    ctx: click.Context,
+    input_path: Path,
+    output_path: Path,
+) -> None:
+    """Extract layout, fonts, and colours from a reference PDF."""
+    ui = _ui_from_ctx(ctx)
     extractor = TemplateExtractor()
-    click.echo(f"Extracting template from: {input_path}")
-    try:
-        style = extractor.extract_to_file(input_path, output_path)
-    except Exception as exc:
-        click.secho(f"Error extracting template: {exc}", fg="red", err=True)
-        sys.exit(1)
 
-    click.secho(f"✓ Template saved to: {output_path}", fg="green")
+    ui.step(f"Analysing {input_path}")
+    try:
+        style = extractor.extract_to_file(str(input_path), str(output_path))
+    except Exception as exc:
+        ui.exit_with_error(f"Could not extract template: {exc}")
+
+    ui.result_path(str(output_path), label="Template saved to")
     pg = style.page_geometry
-    click.echo(f"  Page: {pg.width:.1f} × {pg.height:.1f} pt")
-    click.echo(f"  Primary colour: {style.primary_color}")
-    click.echo(f"  Accent colour:  {style.accent_color}")
+    ui.heading("Extracted style")
+    ui.summary_row("Page size", f"{pg.width:.1f} × {pg.height:.1f} pt")
+    ui.summary_row("Primary", style.primary_color)
+    ui.summary_row("Accent", style.accent_color)
 
 
 # ---------------------------------------------------------------------------
@@ -142,31 +205,40 @@ def extract_template(input_path: str, output_path: str) -> None:
 
 
 @main.command()
-@click.argument("data_path", metavar="FILE", type=click.Path(exists=True, dir_okay=False))
-def validate(data_path: str) -> None:
-    """Validate the structure and required fields of a CV Markdown file."""
+@click.argument(
+    "data_path",
+    metavar="FILE",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.pass_context
+def validate(ctx: click.Context, data_path: Path) -> None:
+    """Check a CV Markdown file for structural issues."""
+    ui = _ui_from_ctx(ctx)
     parser = MarkdownParser()
-    click.echo(f"Validating: {data_path}")
+
+    ui.step(f"Validating {data_path}")
     try:
-        cv, warnings = parser.validate_file(data_path)
+        cv, warnings = parser.validate_file(str(data_path))
     except Exception as exc:
-        click.secho(f"Parse error: {exc}", fg="red", err=True)
-        sys.exit(1)
+        ui.exit_with_error(f"Parse error: {exc}")
 
     if warnings:
-        for w in warnings:
-            click.secho(f"  ⚠  {w}", fg="yellow")
-        click.secho("Validation completed with warnings.", fg="yellow")
+        ui.heading("Warnings")
+        for warning in warnings:
+            ui.warn(warning)
+        ui.info("")
+        ui.warn("Validation completed with warnings.")
     else:
-        click.secho("✓ Validation passed – no issues found.", fg="green")
+        ui.success("Validation passed")
 
-    # Print a brief summary
-    click.echo(f"\n  Name:       {cv.personal_info.name}")
+    ui.heading("Summary")
+    ui.summary_row("Name", cv.personal_info.name)
     if cv.personal_info.title:
-        click.echo(f"  Title:      {cv.personal_info.title}")
-    click.echo(f"  Experience: {len(cv.experience)} entr{'y' if len(cv.experience) == 1 else 'ies'}")
-    click.echo(f"  Skills:     {len(cv.skills)}")
-    click.echo(f"  Education:  {len(cv.education)}")
+        ui.summary_row("Title", cv.personal_info.title)
+    exp_label = "entry" if len(cv.experience) == 1 else "entries"
+    ui.summary_row("Experience", f"{len(cv.experience)} {exp_label}")
+    ui.summary_row("Skills", str(len(cv.skills)))
+    ui.summary_row("Education", str(len(cv.education)))
 
 
 # ---------------------------------------------------------------------------
@@ -176,54 +248,71 @@ def validate(data_path: str) -> None:
 
 @main.command()
 @click.option(
+    "-t",
     "--template",
     "template_path",
-    type=click.Path(exists=True, dir_okay=False),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="Reference PDF template.",
 )
 @click.option(
+    "-d",
     "--data",
     "data_path",
     required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Markdown file containing CV data.",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Markdown file with your CV content.",
 )
-def preview(template_path: Optional[str], data_path: str) -> None:
-    """Generate a temporary preview PDF and print its path.
-
-    The preview is written to a temp file; the caller is responsible for
-    opening it.
-    """
+@click.option(
+    "--open/--no-open",
+    "open_file",
+    default=False,
+    help="Open the preview PDF after rendering (macOS and Linux).",
+)
+@click.pass_context
+def preview(
+    ctx: click.Context,
+    template_path: Optional[Path],
+    data_path: Path,
+    open_file: bool,
+) -> None:
+    """Render a temporary preview PDF."""
     import tempfile
 
+    ui = _ui_from_ctx(ctx)
     parser = MarkdownParser()
+
+    ui.step(f"Parsing {data_path}")
     try:
-        cv = parser.parse_file(data_path)
+        cv = parser.parse_file(str(data_path))
     except Exception as exc:
-        click.secho(f"Error parsing Markdown file: {exc}", fg="red", err=True)
-        sys.exit(1)
+        ui.exit_with_error(f"Could not parse Markdown: {exc}")
 
     style: Optional[TemplateStyle] = None
     if template_path:
+        ui.step(f"Reading template from {template_path}")
         extractor = TemplateExtractor()
         try:
-            style = extractor.extract(template_path)
+            style = extractor.extract(str(template_path))
         except Exception as exc:
-            click.secho(
-                f"Warning: could not read template ({exc}); using default style.",
-                fg="yellow",
-                err=True,
-            )
+            ui.warn(f"Could not read template ({exc}); using default style.")
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = tmp.name
 
+    ui.step("Rendering preview")
     renderer = PDFRenderer(template_style=style)
     try:
         renderer.render(cv, tmp_path)
     except Exception as exc:
-        click.secho(f"Error rendering preview: {exc}", fg="red", err=True)
-        sys.exit(1)
+        ui.exit_with_error(f"Could not render preview: {exc}")
 
-    click.secho(f"✓ Preview written to: {tmp_path}", fg="green")
+    ui.result_path(tmp_path, label="Preview written to")
+
+    if open_file:
+        opener = "open" if platform.system() == "Darwin" else "xdg-open"
+        try:
+            subprocess.run([opener, tmp_path], check=True)
+            ui.detail(f"Opened with {opener}")
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            ui.warn(f"Could not open preview automatically; run: {opener} {tmp_path}")

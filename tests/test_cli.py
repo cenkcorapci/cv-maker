@@ -22,7 +22,14 @@ class TestCLIGenerate:
         result = self.runner.invoke(main, ["generate", "--data", SAMPLE_MD, "--output", out])
         assert result.exit_code == 0, result.output
         assert Path(out).exists()
-        assert "Generated" in result.output
+        assert out in result.output
+
+    def test_generate_default_output_path(self, tmp_path):
+        data = tmp_path / "resume.md"
+        data.write_text("# Personal\nname: Alex\n")
+        result = self.runner.invoke(main, ["generate", "--data", str(data)])
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "resume.pdf").exists()
 
     def test_generate_missing_data_file(self, tmp_path):
         out = str(tmp_path / "cv.pdf")
@@ -70,8 +77,8 @@ class TestCLIPreview:
         assert "Preview written to" in result.output
         # Clean up the temp file
         for line in result.output.splitlines():
-            if "Preview written to:" in line:
-                path = line.split("Preview written to:")[-1].strip()
+            if "Preview written to" in line:
+                path = line.split("Preview written to")[-1].strip()
                 if os.path.exists(path):
                     os.unlink(path)
 
@@ -87,3 +94,13 @@ class TestCLIVersion:
         assert "validate" in result.output
         assert "preview" in result.output
         assert "extract-template" in result.output
+        assert "Examples:" in result.output
+
+    def test_quiet_mode(self, tmp_path):
+        out = str(tmp_path / "cv.pdf")
+        result = self.runner.invoke(
+            main, ["--quiet", "generate", "--data", SAMPLE_MD, "--output", out]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Parsing" not in result.output
+        assert out in result.output
